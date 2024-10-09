@@ -106,6 +106,7 @@ module.exports = {
                 const prompt = promptGenerator(promptParam);
                 logger.logToFile(`指示 : ${prompt.trim()}`); // 指示をコンソールに出力
                 logger.logToFile(`質問 : ${request.trim()}`); // 質問をコンソールに出力
+
                 // 添付ファイルがある場合は内容を取得
                 let attachmentContent = '';
                 if (interaction.options.get('添付ファイル')) {
@@ -122,6 +123,7 @@ module.exports = {
                     }
                     logger.logToFileForAttachment(`${attachmentContent.trim()}`);
                 }
+
                 // 会話利用設定を取得
                 const usePrevious = interaction.options.getBoolean('直前の会話を利用');
                 // 公開設定を取得
@@ -139,6 +141,7 @@ module.exports = {
 
                 // Anthropic に質問を送信し回答を取得
                 (async () => {
+                    let usage = [];
                     try {
                         const messages = [];
                         if (usePrevious && previousQA) {
@@ -156,12 +159,12 @@ module.exports = {
                             max_tokens: 4096
                         });
                         const answer = completion.content[0];
-
                         logger.logToFile(`回答 : ${answer.text.trim()}`); // 回答をコンソールに出力
+                        // 使用トークン情報を取得
+                        usage = completion.usage;
 
                         // 回答を分割
                         const splitMessages = splitAnswer(answer.text);
-
                         // 単一メッセージの場合
                         if (splitMessages.length === 1) {
                             await interaction.editReply({ content: `${messenger.answerMessages(anthropicEmoji, splitMessages[0])}\r\n`, ephemeral: !isPublic });
@@ -191,6 +194,9 @@ module.exports = {
                             logger.errorToFile(`Anthropic API の返信でエラーが発生`, error);
                             await interaction.editReply(`${messenger.errorMessages(`Anthropic API の返信でエラーが発生しました`, error.message)}`);
                         }
+                    } finally {
+                        // 使用トークンをロギング
+                        logger.tokenToFile(usage);
                     }
                 })();
             } catch (error) {
@@ -271,7 +277,6 @@ function splitAnswer(answer) {
     let codeLanguage = '';
 
     const lines = answer.split('\n');
-
     for (const line of lines) {
         // コードブロックの開始または終了を検出
         if (line.startsWith('```')) {

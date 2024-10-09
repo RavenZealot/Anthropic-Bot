@@ -76,6 +76,7 @@ module.exports = {
                 const prompt = promptGenerator(promptParam, target);
                 logger.logToFile(`指示 : ${prompt.trim()}`); // 指示をコンソールに出力
                 logger.logToFile(`原文 : ${request.trim()}`); // 原文をコンソールに出力
+
                 // 公開設定を取得
                 const isPublic = interaction.options.getBoolean('公開') ?? true;
 
@@ -84,6 +85,7 @@ module.exports = {
 
                 // Anthropic に依頼文を送信し翻訳文を取得
                 (async () => {
+                    let usage = [];
                     try {
                         const messages = [
                             { role: 'user', content: `${request}` }
@@ -96,8 +98,9 @@ module.exports = {
                             max_tokens: 2048
                         });
                         const answer = completion.content[0];
-
                         logger.logToFile(`翻訳文 : ${answer.text.trim()}`); // 翻訳文をコンソールに出力
+                        // 使用トークン情報を取得
+                        usage = completion.usage;
 
                         await interaction.editReply(`${messenger.answerMessages(anthropicEmoji, answer.text, target)}\r\n`);
                     } catch (error) {
@@ -111,6 +114,9 @@ module.exports = {
                             logger.errorToFile(`Anthropic API の返信でエラーが発生`, error);
                             await interaction.editReply(`${messenger.errorMessages(`Anthropic API の返信でエラーが発生しました`, error.message)}`);
                         }
+                    } finally {
+                        // 使用トークンをロギング
+                        logger.tokenToFile(usage);
                     }
                 })();
             } catch (error) {
