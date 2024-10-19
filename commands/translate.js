@@ -97,11 +97,11 @@ module.exports = {
                             messages: messages,
                             max_tokens: 2048
                         });
-                        const answer = completion.content[0];
-                        await logger.logToFile(`翻訳文 : ${answer.text.trim()}`); // 翻訳文をコンソールに出力
                         // 使用トークン情報を取得
                         usage = completion.usage;
 
+                        const answer = completion.content[0];
+                        await logger.logToFile(`翻訳文 : ${answer.text.trim()}`); // 翻訳文をコンソールに出力
                         await interaction.editReply(messenger.answerMessages(anthropicEmoji, answer.text, target));
                     } catch (error) {
                         // Discord の文字数制限の場合

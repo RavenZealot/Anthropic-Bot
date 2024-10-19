@@ -162,10 +162,11 @@ module.exports = {
                             messages: messages,
                             max_tokens: 4096
                         });
-                        const answer = completion.content[0];
-                        await logger.logToFile(`回答 : ${answer.text.trim()}`); // 回答をコンソールに出力
                         // 使用トークン情報を取得
                         usage = completion.usage;
+
+                        const answer = completion.content[0];
+                        await logger.logToFile(`回答 : ${answer.text.trim()}`); // 回答をコンソールに出力
 
                         // 回答を分割
                         const splitMessages = splitAnswer(answer.text);
