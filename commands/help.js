@@ -1,3 +1,5 @@
+const { MessageFlags } = require('discord.js');
+
 const logger = require('../utils/logger');
 const messenger = require('../utils/messenger');
 
@@ -13,14 +15,8 @@ module.exports = {
                 type: 3,
                 required: true,
                 choices: [
-                    {
-                        name: 'chat',
-                        value: 'chat'
-                    },
-                    {
-                        name: 'translate',
-                        value: 'translate'
-                    }
+                    { name: 'chat', value: 'chat' },
+                    { name: 'translate', value: 'translate' }
                 ]
             }
         ]
@@ -35,7 +31,7 @@ module.exports = {
                 const target = interaction.options.getString('対象コマンド');
 
                 // interaction の返信を遅延させる
-                await interaction.deferReply({ ephemeral: true });
+                await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
                 // 対象コマンドを解説
                 (async () => {
@@ -56,7 +52,7 @@ module.exports = {
         else {
             await interaction.reply({
                 content: messenger.usageMessages(`このチャンネルでは \`${this.data.name}\` コマンドは使えません`),
-                ephemeral: true
+                flags: MessageFlags.Ephemeral
             });
             return;
         }
