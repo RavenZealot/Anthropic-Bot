@@ -96,7 +96,7 @@ module.exports = {
                 const isPublic = interaction.options.getBoolean('公開') ?? true;
 
                 // interaction の返信を遅延させる
-                await interaction.deferReply({ flags: isPublic ? MessageFlags.Ephemeral : 0 });
+                await interaction.deferReply({ flags: isPublic ? 0 : MessageFlags.Ephemeral });
 
                 // 直前の会話を利用する場合
                 let previousQA = '';
@@ -140,7 +140,7 @@ module.exports = {
                         if (splitMessages.length === 1) {
                             await interaction.editReply({
                                 content: messenger.answerMessages(anthropicEmoji, splitMessages[0]),
-                                flags: isPublic ? MessageFlags.Ephemeral : 0
+                                flags: isPublic ? 0 : MessageFlags.Ephemeral
                             });
                         }
                         // 複数メッセージの場合
@@ -150,12 +150,12 @@ module.exports = {
                                 if (i === 0) {
                                     await interaction.editReply({
                                         content: messenger.answerFollowMessages(anthropicEmoji, message, i + 1, splitMessages.length),
-                                        flags: isPublic ? MessageFlags.Ephemeral : 0
+                                        flags: isPublic ? 0 : MessageFlags.Ephemeral
                                     });
                                 } else {
                                     await interaction.followUp({
                                         content: messenger.answerFollowMessages(anthropicEmoji, message, i + 1, splitMessages.length),
-                                        flags: isPublic ? MessageFlags.Ephemeral : 0
+                                        flags: isPublic ? 0 : MessageFlags.Ephemeral
                                     });
                                 }
                             }
