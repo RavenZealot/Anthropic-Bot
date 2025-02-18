@@ -94,10 +94,12 @@ module.exports = {
     },
 
     // コマンド実行で使用したトークンをファイルに書き込む
-    tokenToFile: async function (usage) {
+    tokenToFile: async function (usedModel, usage) {
         const logFilePath = getLogFilePath('anthropic-bot.log');
 
         const tokenInfo = [
+            `---------- モデル情報 ----------`,
+            `使用モデル : ${usedModel}`,
             `--------- トークン情報 ---------`,
             `質問トークン : ${usage.input_tokens}`,
             `回答トークン : ${usage.output_tokens}`,

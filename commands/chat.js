@@ -122,12 +122,17 @@ module.exports = {
                             messages.push({ role: 'user', content: attachmentContent });
                         }
 
-                        const completion = await ANTHROPIC.messages.create({
-                            model: 'claude-3-5-sonnet-20240620',
+                        // モデルに応じてパラメータを設定
+                        let completionParams = {
+                            model: 'claude-3-5-sonnet-latest',
                             system: prompt,
                             messages: messages,
                             max_tokens: 4096
-                        });
+                        };
+
+                        const completion = await ANTHROPIC.messages.create(completionParams);
+                        // 使用モデル情報を取得
+                        usedModel = completion.model;
                         // 使用トークン情報を取得
                         usage = completion.usage;
 
@@ -176,7 +181,7 @@ module.exports = {
                         }
                     } finally {
                         // 使用トークンをロギング
-                        await logger.tokenToFile(usage);
+                        await logger.tokenToFile(usedModel, usage);
                     }
                 })();
             } catch (error) {
