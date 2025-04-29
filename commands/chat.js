@@ -122,7 +122,7 @@ module.exports = {
 
                         // モデルに応じてパラメータを設定
                         let completionParams = {
-                            model: 'claude-3-5-sonnet-latest',
+                            model: 'claude-3-7-sonnet-latest',
                             system: prompt,
                             messages: messages,
                             max_tokens: 4096
@@ -236,7 +236,9 @@ emoji は次の中から選択してください．\`:bug:\` for Bug fixes, \`:+
 prefix は次の中から選択してください．\`fix\` for Bug fixes, \`hotfix\` for Critical bug fixes, \`update\` for Functionality fixes that are not bugs, \`change\` for Functionality fixes due to specification changes, \`add\` for Add new file, \`feat\` for Add new functionality, \`clean\` for Source code cleanup, \`refactor\` for Refactoring, \`style\` for Format fixes, \`disable\` for Disable, \`remove\` for Remove part of code, \`update\` for Functionality fixes that are not bugs, \`rename\` for Rename file, \`move\` for Move file, \`delete\` for Delete file, \`revert\` for Undo fix, \`temp\` for Temporary or work-in-progress commit, \`upgrade\` for Version up, \`docs\` for Documentation fixes, \`test\` for Add test or fix incorrect test, \`perf\` for Fixes that improve performance, \`chore\` for Add or fix build tools or libraries
 Subject は英語で簡潔な 30 字程度の要約としてください．
 入力例 : チャットのテキストをコピーする機能を追加
-返答例 : **Added feature to copy chat text.**\n- \`:+1: update / Added feature to copy text of chats\`\n- \`:sparkles: feat / Add feature to copy chat text\`\n- \`:up: upgrade / Introduce text copy functionality in chat\``;
+返答例 : **Added feature to copy chat text.**\n- \`:+1: update / Added feature to copy text of chats\`\n- \`:sparkles: feat / Add feature to copy chat text\`\n- \`:up: upgrade / Introduce text copy functionality in chat\`
+同時に，ルートディレクトリを \`feature\` で固定した簡潔なブランチ名を作成してください．
+返答例 : \`feature/chat-copy\``;
         default:
             return `ユーザからの「質問」に対して，Step-By-Step でなるべく詳細に説明してください．`;
     }
