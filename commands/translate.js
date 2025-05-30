@@ -76,10 +76,10 @@ module.exports = {
                         ];
 
                         const completion = await ANTHROPIC.messages.create({
-                            model: 'claude-3-haiku-20240307',
+                            model: 'claude-3-5-haiku-latest',
                             system: prompt,
                             messages: messages,
-                            max_tokens: 2048
+                            max_tokens: 4096
                         });
                         // 使用トークン情報を取得
                         usage = completion.usage;

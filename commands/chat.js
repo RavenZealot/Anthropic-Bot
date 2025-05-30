@@ -122,10 +122,10 @@ module.exports = {
 
                         // モデルに応じてパラメータを設定
                         let completionParams = {
-                            model: 'claude-3-7-sonnet-latest',
+                            model: 'claude-sonnet-4-0',
                             system: prompt,
                             messages: messages,
-                            max_tokens: 4096
+                            max_tokens: 32000
                         };
 
                         const completion = await ANTHROPIC.messages.create(completionParams);
