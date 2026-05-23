@@ -69,6 +69,7 @@ module.exports = {
 
                 // Anthropic に依頼文を送信し翻訳文を取得
                 (async () => {
+                    let usedModel = 'unknown';
                     let usage = [];
                     let modelToUse = 'claude-haiku-4-5';
                     try {
