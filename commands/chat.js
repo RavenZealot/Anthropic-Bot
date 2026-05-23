@@ -111,6 +111,15 @@ module.exports = {
                 (async () => {
                     let usage = [];
                     try {
+                        // プロンプトタイプに応じたモデルの選択
+                        const codePrompts = ['code', 'code_analysis', 'code_review', 'log_analysis'];
+                        let modelToUse;
+                        if (codePrompts.includes(promptParam)) {
+                            modelToUse = 'claude-opus-4-7'
+                        } else {
+                            modelToUse = 'claude-sonnet-4-6'
+                        }
+
                         const messages = [];
                         if (usePrevious && previousQA) {
                             messages.push({ role: 'assistant', content: previousQA });
@@ -122,7 +131,7 @@ module.exports = {
 
                         // モデルに応じてパラメータを設定
                         let completionParams = {
-                            model: 'claude-sonnet-4-0',
+                            model: modelToUse,
                             system: prompt,
                             messages: messages,
                             max_tokens: 32000

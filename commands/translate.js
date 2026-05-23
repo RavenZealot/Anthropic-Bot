@@ -70,13 +70,14 @@ module.exports = {
                 // Anthropic に依頼文を送信し翻訳文を取得
                 (async () => {
                     let usage = [];
+                    let modelToUse = 'claude-haiku-4-5';
                     try {
                         const messages = [
                             { role: 'user', content: request }
                         ];
 
                         const completion = await ANTHROPIC.messages.create({
-                            model: 'claude-3-5-haiku-latest',
+                            model: modelToUse,
                             system: prompt,
                             messages: messages,
                             max_tokens: 4096

@@ -4,16 +4,17 @@ AI chat bot for Discord using Anthropic API
 
 ## Reference
 
-- [Getting started - Anthropic](https://docs.anthropic.com/en/api/getting-started)
+- [API overview - Claude API Docs](https://platform.claude.com/docs/en/api/overview)
+  - [Models overview - Claude API Docs](https://platform.claude.com/docs/en/about-claude/models/overview)
 
 ## Required (Only once)
 
 - `.env` (Root directory)
-  - ANTHROPIC_ORG_ID : Anthropic [Organization ID](https://console.anthropic.com/settings/organization)
+  - ANTHROPIC_ORG_ID : Anthropic [Organization ID](https://platform.claude.com/settings/organization)
     Currently, the Organization ID is not used in the API.
-  - ANTHROPIC_API_KEY : Anthropic [API keys](https://console.anthropic.com/settings/keys)
+  - ANTHROPIC_API_KEY : Anthropic [API keys](https://platform.claude.com/settings/keys)
   - BOT_TOKEN : Discord Application [Token](https://discord.com/developers/applications)
-  - CHAT_CHANNEL_ID : for [Messages](https://docs.anthropic.com/en/api/messages)
+  - CHAT_CHANNEL_ID : for [Messages](https://platform.claude.com/docs/en/api/messages)
     Multiple designations possible
   - ANTHROPIC_EMOJI : Emoji for Anthropic API (e.g. `<:Anthropic:1234567890123456789>`)
 - Discord Application Generated URL
