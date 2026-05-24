@@ -57,207 +57,205 @@ module.exports = {
     async execute(interaction, ANTHROPIC) {
         const channelId = process.env.CHAT_CHANNEL_ID.split(',');
         const anthropicEmoji = process.env.ANTHROPIC_EMOJI;
-        // チャンネルが `Claude` 用の場合に実行
-        if (channelId.includes(interaction.channelId)) {
-            // `chat` コマンドが呼び出された場合 Anthropic に質問を送信
-            try {
-                // コマンドを実行したユーザの ID を取得
-                const userId = interaction.user.id;
-                // 質問を取得
-                const request = interaction.options.getString('質問');
-                // 選択されたプロンプト方式から質問文を生成
-                const promptParam = interaction.options.getString('プロンプト') || 'default';
-                const prompt = promptGenerator(promptParam);
-                await logger.logToFile(`指示 : ${prompt.trim()}`); // 指示をコンソールに出力
-                await logger.logToFile(`質問 : ${request.trim()}`); // 質問をコンソールに出力
-
-                // 添付ファイルがある場合は内容を取得
-                let rawAttachment = '';
-                let attachmentContent = '';
-                if (interaction.options.get('添付ファイル')) {
-                    const attachment = interaction.options.getAttachment('添付ファイル');
-                    // 添付ファイルがテキストの場合は質問文に追加
-                    if (attachment.contentType.startsWith('text/')) {
-                        try {
-                            const response = await fetch(attachment.url);
-                            const arrayBuffer = await response.arrayBuffer();
-                            rawAttachment = Buffer.from(arrayBuffer).toString();
-                            attachmentContent = rawAttachment
-                                .replace(/\r\n/g, '\n')
-                                .replace(/\n{3,}/g, '\n\n')
-                                .replace(/[ \t]+$/gm, '');
-                        } catch (error) {
-                            await logger.errorToFile('添付ファイルの取得中にエラーが発生', error);
-                        }
-                    }
-                    await logger.logToFileForAttachment(rawAttachment.trim());
-                }
-
-                // 会話利用設定を取得
-                const usePrevious = interaction.options.getBoolean('直前の会話を利用');
-                // 公開設定を取得
-                const isPublic = interaction.options.getBoolean('公開') ?? true;
-
-                // interaction の返信を遅延させる
-                await interaction.deferReply({ flags: isPublic ? 0 : MessageFlags.Ephemeral });
-
-                // 直前の会話を利用する場合
-                let previousSummary = null;
-                if (usePrevious) {
-                    try {
-                        const state = await logger.loadConversationState(userId);
-                        if (state && state.summary) {
-                            previousSummary = state.summary;
-                            await logger.logToFile(`会話状態 : ${previousSummary.trim()}`);
-                        }
-                    } catch (error) {
-                        await logger.errorToFile('会話状態の取得でエラーが発生', error);
-                    }
-                }
-
-                // Anthropic に質問を送信し回答を取得
-                (async () => {
-                    let usedModel = 'unknown';
-                    let usage = [];
-                    try {
-                        // プロンプトタイプに応じたモデルの選択
-                        const codePrompts = ['code', 'code_analysis', 'code_review', 'log_analysis'];
-                        let modelToUse;
-                        if (codePrompts.includes(promptParam)) {
-                            modelToUse = 'claude-opus-4-7'
-                        } else {
-                            modelToUse = 'claude-sonnet-4-6'
-                        }
-
-                        const messages = [];
-                        const userContent = [];
-                        if (attachmentContent) {
-                            userContent.push({
-                                type: 'text',
-                                text: `<attachment>\n${attachmentContent}\n</attachment>`,
-                                cache_control: { type: 'ephemeral' }
-                            });
-                        }
-                        userContent.push({
-                            type: 'text',
-                            text: request
-                        });
-                        messages.push({ role: 'user', content: userContent });
-
-                        const systemContent = [{
-                            type: 'text',
-                            text: prompt,
-                            cache_control: { type: 'ephemeral' }
-                        }];
-                        // 直前の会話要約を追加
-                        if (usePrevious && previousSummary) {
-                            systemContent.push({
-                                type: 'text',
-                                text:
-                                    `あなたはユーザーとの過去の会話の要約を引き継いで対話するアシスタントです\n` +
-                                    `<conversation_summary>\n` +
-                                    `${previousSummary}\n` +
-                                    `</conversation_summary>\n\n` +
-                                    `上記の <conversation_summary> に記載されている「制約」や「要望」を厳密に守って回答してください`,
-                                cache_control: { type: 'ephemeral' }
-                            });
-                        }
-
-                        // モデルに応じてパラメータを設定
-                        let completionParams = {
-                            model: modelToUse,
-                            system: systemContent,
-                            messages: messages,
-                            max_tokens: 32000
-                        };
-
-                        const completion = await ANTHROPIC.messages.create(completionParams);
-                        // 使用モデル情報を取得
-                        usedModel = completion.model;
-                        // 使用トークン情報を取得
-                        usage = completion.usage;
-
-                        const answer = completion.content[0];
-                        await logger.logToFile(`回答 : ${answer.text.trim()}`); // 回答をコンソールに出力
-
-                        // 回答を分割
-                        const splitMessages = splitAnswer(answer.text);
-                        // 単一メッセージの場合
-                        if (splitMessages.length === 1) {
-                            await interaction.editReply({
-                                content: messenger.answerMessages(anthropicEmoji, splitMessages[0]),
-                                flags: isPublic ? 0 : MessageFlags.Ephemeral
-                            });
-                        }
-                        // 複数メッセージの場合
-                        else {
-                            for (let i = 0; i < splitMessages.length; i++) {
-                                const message = splitMessages[i];
-                                if (i === 0) {
-                                    await interaction.editReply({
-                                        content: messenger.answerFollowMessages(anthropicEmoji, message, i + 1, splitMessages.length),
-                                        flags: isPublic ? 0 : MessageFlags.Ephemeral
-                                    });
-                                } else {
-                                    await interaction.followUp({
-                                        content: messenger.answerFollowMessages(anthropicEmoji, message, i + 1, splitMessages.length),
-                                        flags: isPublic ? 0 : MessageFlags.Ephemeral
-                                    });
-                                }
-                            }
-                        }
-
-                        // 会話状態を要約して保存
-                        try {
-                            const summaryResult = await summarizeConversationState(
-                                ANTHROPIC,
-                                previousSummary,
-                                request,
-                                attachmentContent,
-                                answer.text
-                            );
-                            if (summaryResult.summary) {
-                                await logger.saveConversationState(userId, {
-                                    summary: summaryResult.summary,
-                                    last_message_id: completion.id,
-                                    model: completion.model
-                                });
-
-                                await logger.logToFile(`会話状態保存 : ${completion.id}`);
-                                await logger.logToFile(`要約 : ${summaryResult.summary.trim()}`);
-                            }
-                        } catch (error) {
-                            await logger.errorToFile('会話状態の保存でエラーが発生', error);
-                        }
-                    } catch (error) {
-                        // Discord の文字数制限の場合
-                        if (error.message.includes('Invalid Form Body')) {
-                            await logger.errorToFile('Discord 文字数制限が発生', error);
-                            await interaction.editReply(messenger.errorMessages('Discord 文字数制限が発生しました', error.message));
-                        }
-                        // その他のエラーの場合
-                        else {
-                            await logger.errorToFile('Anthropic API の返信でエラーが発生', error);
-                            await interaction.editReply(messenger.errorMessages('Anthropic API の返信でエラーが発生しました', error.message));
-                        }
-                    } finally {
-                        // 使用トークンをロギング
-                        await logger.tokenToFile(usedModel, usage);
-                    }
-                })();
-            } catch (error) {
-                await logger.errorToFile('質問の取得でエラーが発生', error);
-                await interaction.editReply(messenger.errorMessages('質問の取得でエラーが発生しました', error.message));
-            }
-        }
         // インタラクションが特定のチャンネルでなければ何もしない
-        else {
+        if (!channelId.includes(interaction.channelId)) {
             await interaction.reply({
                 content: messenger.usageMessages(`このチャンネルでは \`${this.data.name}\` コマンドは使えません`),
                 flags: MessageFlags.Ephemeral
             });
             return;
         }
+        // `chat` コマンドが呼び出された場合 Anthropic に質問を送信
+        try {
+            // コマンドを実行したユーザの ID を取得
+            const userId = interaction.user.id;
+            // 質問を取得
+            const request = interaction.options.getString('質問');
+            // 選択されたプロンプト方式から質問文を生成
+            const promptParam = interaction.options.getString('プロンプト') || 'default';
+            const prompt = promptGenerator(promptParam);
+            // 会話利用設定を取得
+            const usePrevious = interaction.options.getBoolean('直前の会話を利用');
+            // 公開設定を取得
+            const isPublic = interaction.options.getBoolean('公開') ?? true;
+
+            await logger.logToFile(`指示 : ${prompt.trim()}`); // 指示をコンソールに出力
+            await logger.logToFile(`質問 : ${request.trim()}`); // 質問をコンソールに出力
+
+            // 添付ファイルがある場合は内容を取得
+            let rawAttachment = '';
+            let attachmentContent = '';
+            if (interaction.options.get('添付ファイル')) {
+                const attachment = interaction.options.getAttachment('添付ファイル');
+                // 添付ファイルがテキストの場合は質問文に追加
+                if (attachment.contentType.startsWith('text/')) {
+                    try {
+                        const response = await fetch(attachment.url);
+                        const arrayBuffer = await response.arrayBuffer();
+                        rawAttachment = Buffer.from(arrayBuffer).toString();
+                        attachmentContent = rawAttachment
+                            .replace(/\r\n/g, '\n')
+                            .replace(/\n{3,}/g, '\n\n')
+                            .replace(/[ \t]+$/gm, '');
+                    } catch (error) {
+                        await logger.errorToFile('添付ファイルの取得中にエラーが発生', error);
+                    }
+                }
+                await logger.logToFileForAttachment(rawAttachment.trim());
+            }
+
+            // interaction の返信を遅延させる
+            await interaction.deferReply({ flags: isPublic ? 0 : MessageFlags.Ephemeral });
+
+            // 直前の会話を利用する場合
+            let previousSummary = null;
+            if (usePrevious) {
+                try {
+                    const state = await logger.loadConversationState(userId);
+                    if (state && state.summary) {
+                        previousSummary = state.summary;
+                        await logger.logToFile(`会話状態 : ${previousSummary.trim()}`);
+                    }
+                } catch (error) {
+                    await logger.errorToFile('会話状態の取得でエラーが発生', error);
+                }
+            }
+
+            // Anthropic に質問を送信し回答を取得
+            (async () => {
+                let usedModel = 'unknown';
+                let usage = [];
+                try {
+                    // プロンプトタイプに応じたモデルの選択
+                    const codePrompts = ['code', 'code_analysis', 'code_review', 'log_analysis'];
+                    let modelToUse;
+                    if (codePrompts.includes(promptParam)) {
+                        modelToUse = 'claude-opus-4-7'
+                    } else {
+                        modelToUse = 'claude-sonnet-4-6'
+                    }
+
+                    const messages = [];
+                    const userContent = [];
+                    if (attachmentContent) {
+                        userContent.push({
+                            type: 'text',
+                            text: `<attachment>\n${attachmentContent}\n</attachment>`,
+                            cache_control: { type: 'ephemeral' }
+                        });
+                    }
+                    userContent.push({
+                        type: 'text',
+                        text: request
+                    });
+                    messages.push({ role: 'user', content: userContent });
+
+                    const systemContent = [{
+                        type: 'text',
+                        text: prompt,
+                        cache_control: { type: 'ephemeral' }
+                    }];
+                    // 直前の会話要約を追加
+                    if (usePrevious && previousSummary) {
+                        systemContent.push({
+                            type: 'text',
+                            text:
+                                `あなたはユーザーとの過去の会話の要約を引き継いで対話するアシスタントです\n` +
+                                `<conversation_summary>\n` +
+                                `${previousSummary}\n` +
+                                `</conversation_summary>\n\n` +
+                                `上記の <conversation_summary> に記載されている「制約」や「要望」を厳密に守って回答してください`,
+                            cache_control: { type: 'ephemeral' }
+                        });
+                    }
+
+                    // モデルに応じてパラメータを設定
+                    let completionParams = {
+                        model: modelToUse,
+                        system: systemContent,
+                        messages: messages,
+                        max_tokens: 32000
+                    };
+
+                    const completion = await ANTHROPIC.messages.create(completionParams);
+                    // 使用モデル情報を取得
+                    usedModel = completion.model;
+                    // 使用トークン情報を取得
+                    usage = completion.usage;
+
+                    const answer = completion.content[0];
+                    await logger.logToFile(`回答 : ${answer.text.trim()}`); // 回答をコンソールに出力
+
+                    // 回答を分割
+                    const splitMessages = splitAnswer(answer.text);
+                    // 単一メッセージの場合
+                    if (splitMessages.length === 1) {
+                        await interaction.editReply({
+                            content: messenger.answerMessages(anthropicEmoji, splitMessages[0]),
+                            flags: isPublic ? 0 : MessageFlags.Ephemeral
+                        });
+                    }
+                    // 複数メッセージの場合
+                    else {
+                        for (let i = 0; i < splitMessages.length; i++) {
+                            const message = splitMessages[i];
+                            if (i === 0) {
+                                await interaction.editReply({
+                                    content: messenger.answerFollowMessages(anthropicEmoji, message, i + 1, splitMessages.length),
+                                    flags: isPublic ? 0 : MessageFlags.Ephemeral
+                                });
+                            } else {
+                                await interaction.followUp({
+                                    content: messenger.answerFollowMessages(anthropicEmoji, message, i + 1, splitMessages.length),
+                                    flags: isPublic ? 0 : MessageFlags.Ephemeral
+                                });
+                            }
+                        }
+                    }
+
+                    // 会話状態を要約して保存
+                    try {
+                        const summaryResult = await summarizeConversationState(
+                            ANTHROPIC,
+                            previousSummary,
+                            request,
+                            attachmentContent,
+                            answer.text
+                        );
+                        if (summaryResult.summary) {
+                            await logger.saveConversationState(userId, {
+                                summary: summaryResult.summary,
+                                last_message_id: completion.id,
+                                model: completion.model
+                            });
+
+                            await logger.logToFile(`会話状態保存 : ${completion.id}`);
+                            await logger.logToFile(`要約 : ${summaryResult.summary.trim()}`);
+                        }
+                    } catch (error) {
+                        await logger.errorToFile('会話状態の保存でエラーが発生', error);
+                    }
+                } catch (error) {
+                    // Discord の文字数制限の場合
+                    if (error.message.includes('Invalid Form Body')) {
+                        await logger.errorToFile('Discord 文字数制限が発生', error);
+                        await interaction.editReply(messenger.errorMessages('Discord 文字数制限が発生しました', error.message));
+                    }
+                    // その他のエラーの場合
+                    else {
+                        await logger.errorToFile('Anthropic API の返信でエラーが発生', error);
+                        await interaction.editReply(messenger.errorMessages('Anthropic API の返信でエラーが発生しました', error.message));
+                    }
+                } finally {
+                    // 使用トークンをロギング
+                    await logger.tokenToFile(usedModel, usage);
+                }
+            })();
+        } catch (error) {
+            await logger.errorToFile('質問の取得でエラーが発生', error);
+            await interaction.editReply(messenger.errorMessages('質問の取得でエラーが発生しました', error.message));
+        }
+
     }
 };
 
@@ -331,7 +329,9 @@ function promptGenerator(prompt) {
         case 'code':
             return `ユーザからの「要求」に対して，あなたは専門的知見をもった熟練のプログラマとして全ての機能を満たすソースコードを考案してください．
 プログラム言語についての指定は「要求」に従い，指定がなければ都度最良の言語を選択し，判断理由も合わせて回答してください．
-ソースコードに対する解説は簡潔にまとめるようにしてください．`;
+ソースコードに対する解説は簡潔にまとめるようにしてください．
+・コードの提供があった場合，「要求」以外の箇所はコメントなど含めて絶対に改変しないでください
+・コードの提示は全文を示すのではなく，必要な箇所のみを示すようにしてください`;
         case 'code_analysis':
             return `ユーザが提供する「ソースコード」に対して，あなたは専門的知見をもった熟練のプログラマとしてソースコードの概要を説明してください．ただし，改行文字が脱落することがあります．
 なお，次の説明は必ず含めてください．
