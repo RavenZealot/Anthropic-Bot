@@ -102,13 +102,16 @@ module.exports = {
                 await interaction.deferReply({ flags: isPublic ? 0 : MessageFlags.Ephemeral });
 
                 // 直前の会話を利用する場合
-                let previousQA = '';
+                let previousSummary = null;
                 if (usePrevious) {
                     try {
-                        previousQA = await logger.answerFromFile(userId);
-                        await logger.logToFile(`前回 : ${previousQA.trim()}`);
+                        const state = await logger.loadConversationState(userId);
+                        if (state && state.summary) {
+                            previousSummary = state.summary;
+                            await logger.logToFile(`会話状態 : ${previousSummary.trim()}`);
+                        }
                     } catch (error) {
-                        await logger.errorToFile('直前の会話の取得でエラーが発生', error);
+                        await logger.errorToFile('会話状態の取得でエラーが発生', error);
                     }
                 }
 
@@ -127,12 +130,6 @@ module.exports = {
                         }
 
                         const messages = [];
-                        if (usePrevious && previousQA) {
-                            messages.push({
-                                role: 'assistant',
-                                content: `<previous_answer>\n${previousQA}\n</previous_answer>`
-                            });
-                        }
                         const userContent = [];
                         if (attachmentContent) {
                             userContent.push({
@@ -147,14 +144,29 @@ module.exports = {
                         });
                         messages.push({ role: 'user', content: userContent });
 
+                        const systemContent = [{
+                            type: 'text',
+                            text: prompt,
+                            cache_control: { type: 'ephemeral' }
+                        }];
+                        // 直前の会話要約を追加
+                        if (usePrevious && previousSummary) {
+                            systemContent.push({
+                                type: 'text',
+                                text:
+                                    `あなたはユーザーとの過去の会話の要約を引き継いで対話するアシスタントです\n` +
+                                    `<conversation_summary>\n` +
+                                    `${previousSummary}\n` +
+                                    `</conversation_summary>\n\n` +
+                                    `上記の <conversation_summary> に記載されている「制約」や「要望」を厳密に守って回答してください`,
+                                cache_control: { type: 'ephemeral' }
+                            });
+                        }
+
                         // モデルに応じてパラメータを設定
                         let completionParams = {
                             model: modelToUse,
-                            system: [{
-                                type: 'text',
-                                text: prompt,
-                                cache_control: { type: 'ephemeral' }
-                            }],
+                            system: systemContent,
                             messages: messages,
                             max_tokens: 32000
                         };
@@ -195,8 +207,28 @@ module.exports = {
                             }
                         }
 
-                        // 質問と回答をファイルに書き込む
-                        await logger.answerToFile(userId, request.trim(), rawAttachment.trim(), answer.text.trim());
+                        // 会話状態を要約して保存
+                        try {
+                            const summaryResult = await summarizeConversationState(
+                                ANTHROPIC,
+                                previousSummary,
+                                request,
+                                attachmentContent,
+                                answer.text
+                            );
+                            if (summaryResult.summary) {
+                                await logger.saveConversationState(userId, {
+                                    summary: summaryResult.summary,
+                                    last_message_id: completion.id,
+                                    model: completion.model
+                                });
+
+                                await logger.logToFile(`会話状態保存 : ${completion.id}`);
+                                await logger.logToFile(`要約 : ${summaryResult.summary.trim()}`);
+                            }
+                        } catch (error) {
+                            await logger.errorToFile('会話状態の保存でエラーが発生', error);
+                        }
                     } catch (error) {
                         // Discord の文字数制限の場合
                         if (error.message.includes('Invalid Form Body')) {
@@ -228,6 +260,68 @@ module.exports = {
         }
     }
 };
+
+async function summarizeConversationState(ANTHROPIC, previousSummary, request, attachmentContent, answerText) {
+    const summaryModel = 'claude-haiku-4-5';
+    const summaryMaxTokens = 1200;
+
+    const summaryPrompt = [
+        '<conversation_summary>',
+        previousSummary || 'なし',
+        '</conversation_summary>',
+        '',
+        '<current_user_request>',
+        request,
+        '</current_user_request>',
+        '',
+        attachmentContent
+            ? [
+                '<current_attachment_excerpt>',
+                limitText(attachmentContent, 12000),
+                '</current_attachment_excerpt>'
+            ].join('\n')
+            : '<current_attachment_excerpt>なし</current_attachment_excerpt>',
+        '',
+        '<current_assistant_answer>',
+        limitText(answerText, 16000),
+        '</current_assistant_answer>'
+    ].join('\n');
+    const completion = await ANTHROPIC.messages.create({
+        model: summaryModel,
+        max_tokens: summaryMaxTokens,
+        temperature: 0,
+        system:
+            `Discord Bot の会話を別の AI アシスタントに引き継ぐため，会話を圧縮して保存\n` +
+            `ユーザの要望や制約は確実に引き継がせる\n` +
+            `挨拶や前置き，冗長な表現は絶対に含めない`,
+        messages: [{ role: 'user', content: [{ type: 'text', text: summaryPrompt }] }]
+    });
+
+    const summary = completion.content
+        .filter((content) => content.type === 'text')
+        .map((content) => content.text)
+        .join('\n')
+        .trim();
+
+    return {
+        summary,
+        model: completion.model,
+        usage: completion.usage
+    };
+}
+
+function limitText(text, maxLength) {
+    if (!text) return '';
+
+    if (text.length <= maxLength) {
+        return text;
+    }
+
+    return (
+        text.slice(0, maxLength) +
+        `\n\n… ${text.length - maxLength} 文字を省略 …`
+    );
+}
 
 function promptGenerator(prompt) {
     switch (prompt) {

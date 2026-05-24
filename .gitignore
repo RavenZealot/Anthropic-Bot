@@ -1,3 +1,4 @@
 node_modules/
 /.env
 /anthropic-bot*.log
+/anthropic-bot*.json
