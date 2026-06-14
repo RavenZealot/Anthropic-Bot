@@ -3,8 +3,8 @@ const PATH = require('path');
 
 module.exports = {
     // 会話状態をファイルに書き込む
-    saveConversationState: async function (userid, conversationstate) {
-        const stateFilePath = getStateFilePath(userid);
+    saveConversationState: async function (messageId, conversationstate) {
+        const stateFilePath = getStateFilePath(messageId);
         await FS.mkdir(PATH.dirname(stateFilePath), { recursive: true });
         const state = {
             state: conversationstate,
@@ -14,8 +14,8 @@ module.exports = {
     },
 
     // 会話状態をファイルから読み込む
-    loadConversationState: async function (userid) {
-        const stateFilePath = getStateFilePath(userid);
+    loadConversationState: async function (messageId) {
+        const stateFilePath = getStateFilePath(messageId);
         try {
             const data = await FS.readFile(stateFilePath, 'utf-8');
             const parsedData = JSON.parse(data);
@@ -80,6 +80,20 @@ module.exports = {
         await FS.appendFile(logFilePath, `\n\n${userInfo}\n`);
     },
 
+    // メッセージを送信したユーザ情報をファイルにのみ書き込む
+    messageUserToFile: async function (message) {
+        const logFilePath = getLogFilePath('anthropic-bot.log');
+
+        const userInfo = [
+            `---------- ユーザ情報 ----------`,
+            `ユーザ名 : ${message.author.username}`,
+            `ユーザID  : ${message.author.id}`,
+            `--------------------------------`
+        ].join('\n');
+
+        await FS.appendFile(logFilePath, `\n\n${userInfo}\n`);
+    },
+
     // コマンド実行で使用したトークンをファイルに書き込む
     tokenToFile: async function (usedModel, usage) {
         const logFilePath = getLogFilePath('anthropic-bot.log');
@@ -117,6 +131,28 @@ module.exports = {
             if (error.code !== 'ENOENT') throw error;
         }
 
+        // 古い会話状態ファイルを削除
+        try {
+            const stateDir = PATH.resolve(__dirname, '../states');
+            const files = await FS.readdir(stateDir);
+            const now = Date.now();
+            const expireMs = 7 * 24 * 60 * 60 * 1000;
+
+            for (const file of files) {
+                if (file.endsWith('.json')) {
+                    const filePath = PATH.join(stateDir, file);
+                    const stats = await FS.stat(filePath);
+                    // 最終更新日時から閾値以上経過しているファイルを削除
+                    if (now - stats.mtimeMs > expireMs) {
+                        await FS.unlink(filePath);
+                    }
+                }
+            }
+        } catch (error) {
+            // ディレクトリが存在しない場合は無視
+            if (error.code !== 'ENOENT') throw error;
+        }
+
         // 新しいログファイルを作成
         await FS.writeFile(logFilePath, '');
     }
@@ -129,3 +165,7 @@ function getLogFilePath(fileName) {
 function getStateFilePath(userid) {
     return PATH.resolve(__dirname, `../anthropic-bot-${userid}.json`);
 };
+
+function getStateFilePath(messageId) {
+    return PATH.resolve(__dirname, `../states/anthropic-bot-message-${messageId}.json`);
+}
