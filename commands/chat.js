@@ -44,6 +44,12 @@ module.exports = {
                 description: '他のユーザに公開するかを選択してください．',
                 type: 5,
                 required: false
+            },
+            {
+                name: '最上位モデル',
+                description: '最上位モデル（高額）を使用するかを選択してください．',
+                type: 5,
+                required: false
             }
         ]
     },
@@ -70,6 +76,8 @@ module.exports = {
             const prompt = promptGenerator(promptParam);
             // 公開設定を取得
             const isPublic = interaction.options.getBoolean('公開') ?? true;
+            // 最上位モデル使用設定を取得
+            const usePremiumModel = interaction.options.getBoolean('最上位モデル') ?? false;
 
             await logger.logToFile(`指示 : ${prompt.trim()}`); // 指示をコンソールに出力
             await logger.logToFile(`質問 : ${request.trim()}`); // 質問をコンソールに出力
@@ -107,7 +115,9 @@ module.exports = {
                     // プロンプトタイプに応じたモデルの選択
                     const codePrompts = ['code', 'code_analysis', 'code_review', 'log_analysis'];
                     let modelToUse;
-                    if (codePrompts.includes(promptParam)) {
+                    if (usePremiumModel) {
+                        modelToUse = 'claude-fable-5'
+                    } else if (codePrompts.includes(promptParam)) {
                         modelToUse = 'claude-opus-4-7'
                     } else {
                         modelToUse = 'claude-sonnet-4-6'
@@ -198,7 +208,6 @@ module.exports = {
                             });
 
                             await logger.logToFile(`会話状態保存 : ${lastMessageId}`);
-                            await logger.logToFile(`要約 : ${summaryResult.summary.trim()}`);
                         }
                     } catch (error) {
                         await logger.errorToFile('会話状態の保存でエラーが発生', error);
@@ -275,7 +284,11 @@ module.exports = {
                 let usedModel = 'unknown';
                 let usage = [];
                 try {
-                    const modelToUse = state.model || 'claude-sonnet-4-6';
+                    const previousModel = state.model || 'claude-sonnet-4-6';
+                    // 高額モデル使用時の会話継続時は安価モデルにフォールバック
+                    const modelToUse = previousModel.includes('claude-fable-5')
+                        ? 'claude-sonnet-4-6'
+                        : previousModel;
 
                     const messages = [];
                     const userContent = [];
@@ -361,20 +374,23 @@ module.exports = {
                             });
 
                             await logger.logToFile(`会話状態保存 : ${lastMessageId}`);
-                            await logger.logToFile(`要約 : ${summaryResult.summary.trim()}`);
                         }
                     } catch (error) {
                         await logger.errorToFile('会話状態の保存でエラーが発生', error);
                     }
                 } catch (error) {
+                    // Discord の文字数制限の場合
                     if (error.message.includes('Invalid Form Body')) {
                         await logger.errorToFile('Discord 文字数制限が発生', error);
                         await processingMsg.edit(messenger.errorMessages('Discord 文字数制限が発生しました', error.message));
-                    } else {
+                    }
+                    // その他のエラーの場合
+                    else {
                         await logger.errorToFile('Anthropic API の返信でエラーが発生', error);
                         await processingMsg.edit(messenger.errorMessages('Anthropic API の返信でエラーが発生しました', error.message));
                     }
                 } finally {
+                    // 使用トークンをロギング
                     await logger.tokenToFile(usedModel, usage);
                 }
             })();
