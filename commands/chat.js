@@ -1,7 +1,17 @@
-const { MessageFlags } = require('discord.js');
+const { MessageFlags, ChannelType } = require('discord.js');
 
 const logger = require('../utils/logger');
 const messenger = require('../utils/messenger');
+
+const MODELS = {
+    PREMIUM: 'claude-fable-5',
+    CODE: 'claude-opus-4-7',
+    DEFAULT: 'claude-sonnet-4-6',
+    LIGHT: 'claude-haiku-4-5'
+};
+
+const MESSAGE_MAX_LENGTH = 2000;
+const THREAD_MAX_LENGTH = 80;
 
 module.exports = {
     data: {
@@ -77,14 +87,16 @@ module.exports = {
             // 添付ファイルがある場合は内容を取得
             let rawAttachment = '';
             let attachmentContent = '';
+            let attachmentInfo = null;
             if (interaction.options.get('添付ファイル')) {
                 const attachment = interaction.options.getAttachment('添付ファイル');
+                attachmentInfo = { name: attachment.name, url: attachment.url };
                 // 添付ファイルがテキストの場合は質問文に追加
-                if (attachment.contentType.startsWith('text/')) {
+                if (attachment.contentType && attachment.contentType.startsWith('text/')) {
                     try {
                         const response = await fetch(attachment.url);
                         const arrayBuffer = await response.arrayBuffer();
-                        rawAttachment = Buffer.from(arrayBuffer).toString();
+                        rawAttachment = Buffer.from(arrayBuffer).toString('utf-8');
                         attachmentContent = rawAttachment
                             .replace(/\r\n/g, '\n')
                             .replace(/\n{3,}/g, '\n\n')
@@ -99,6 +111,41 @@ module.exports = {
             // interaction の返信を遅延させる
             await interaction.deferReply();
 
+            // 質問文からスレッド名を生成
+            let threadName;
+            try {
+                threadName = await generateThreadName(ANTHROPIC, request, attachmentContent);
+            } catch (error) {
+                await logger.errorToFile('スレッド名の生成でエラーが発生', error);
+                threadName = request.length > THREAD_MAX_LENGTH ? request.slice(0, THREAD_MAX_LENGTH - 5) + '…' : request;
+            }
+
+            // スレッド作成メッセージを投稿
+            const starterMsg = await interaction.editReply({
+                content: `<@${userId}> からの質問用スレッドを作成します`
+            });
+
+            // スレッドを作成
+            const thread = await starterMsg.startThread({
+                name: threadName,
+                autoArchiveDuration: 1440
+            });
+            await logger.logToFile(`スレッド作成 : ${thread.name} (${thread.id})`);
+
+            // ユーザの質問文をスレッドへ投稿
+            const starterContent = buildStarterMessage(userId, request, attachmentInfo);
+            await thread.send({
+                content: starterContent
+            });
+
+            // 回答生成中メッセージをスレッドへ投稿
+            const processingMsg = await thread.send('回答を生成中…');
+
+            // メインチャンネルのメッセージをスレッドへの導線に更新
+            await starterMsg.edit({
+                content: `<@${userId}> からの質問用スレッド : <#${thread.id}>`
+            });
+
             // Anthropic に質問を送信し回答を取得
             (async () => {
                 let usedModel = 'unknown';
@@ -108,11 +155,11 @@ module.exports = {
                     const codePrompts = ['code', 'code_analysis', 'code_review', 'log_analysis'];
                     let modelToUse;
                     if (usePremiumModel) {
-                        modelToUse = 'claude-fable-5'
+                        modelToUse = MODELS.PREMIUM;
                     } else if (codePrompts.includes(promptParam)) {
-                        modelToUse = 'claude-opus-4-7'
+                        modelToUse = MODELS.CODE;
                     } else {
-                        modelToUse = 'claude-sonnet-4-6'
+                        modelToUse = MODELS.DEFAULT;
                     }
 
                     const messages = [];
@@ -144,73 +191,76 @@ module.exports = {
                         max_tokens: 32000
                     };
 
-                    const completion = await ANTHROPIC.messages.create(completionParams);
+                    const completion = await createMessage(ANTHROPIC, completionParams);
                     // 使用モデル情報を取得
                     usedModel = completion.model;
                     // 使用トークン情報を取得
                     usage = completion.usage;
 
-                    const answer = completion.content[0];
-                    await logger.logToFile(`回答 : ${answer.text.trim()}`); // 回答をコンソールに出力
+                    const answerText = (completion.content || [])
+                        .filter((content) => content.type === 'text')
+                        .map((content) => content.text)
+                        .join('\n')
+                        .trim();
 
-                    // 回答を分割
-                    const splitMessages = splitAnswer(answer.text);
+                    if (!answerText) {
+                        throw new Error('Anthropic API からの回答が空です');
+                    }
+
+                    await logger.logToFile(`回答 : ${answerText.trim()}`); // 回答をコンソールに出力
+
+                    // 回答を分割してスレッドへ投稿
+                    const splitMessages = splitAnswer(answerText);
                     let lastMessageId;
                     // 単一メッセージの場合
                     if (splitMessages.length === 1) {
-                        const replyMsg = await interaction.editReply({
+                        await processingMsg.edit({
                             content: messenger.answerMessages(anthropicEmoji, splitMessages[0])
                         });
-                        lastMessageId = replyMsg.id;
                     }
                     // 複数メッセージの場合
                     else {
                         for (let i = 0; i < splitMessages.length; i++) {
                             const message = splitMessages[i];
                             if (i === 0) {
-                                const replyMsg = await interaction.editReply({
+                                await processingMsg.edit({
                                     content: messenger.answerFollowMessages(anthropicEmoji, message, i + 1, splitMessages.length)
                                 });
-                                if (i === splitMessages.length - 1) {
-                                    lastMessageId = replyMsg.id;
-                                }
                             } else {
-                                const followMsg = await interaction.followUp({
+                                await thread.send({
                                     content: messenger.answerFollowMessages(anthropicEmoji, message, i + 1, splitMessages.length)
                                 });
-                                if (i === splitMessages.length - 1) {
-                                    lastMessageId = followMsg.id;
-                                }
                             }
                         }
                     }
 
                     // 会話状態を要約して保存
                     try {
-                        const summaryResult = await summarizeConversationState(ANTHROPIC, null, request, attachmentContent, answer.text);
+                        const summaryResult = await summarizeConversationState(ANTHROPIC, null, request, attachmentContent, answerText);
                         if (summaryResult.summary) {
-                            await logger.saveConversationState(lastMessageId, {
+                            const conversationState = {
                                 summary: summaryResult.summary,
                                 last_message_id: completion.id,
                                 promptParam: promptParam,
                                 model: completion.model
-                            });
-
-                            await logger.logToFile(`会話状態保存 : ${lastMessageId}`);
+                            };
+                            await logger.saveThreadConversationState(thread.id, conversationState);
+                            await logger.logToFile(`会話状態保存 : ${thread.id}`);
                         }
+                        await logger.tokenToFile(summaryResult.model, summaryResult.usage);
                     } catch (error) {
                         await logger.errorToFile('会話状態の保存でエラーが発生', error);
                     }
                 } catch (error) {
                     // Discord の文字数制限の場合
-                    if (error.message.includes('Invalid Form Body')) {
+                    if (error.code === 50035 || error.message?.includes('Invalid Form Body')) {
                         await logger.errorToFile('Discord 文字数制限が発生', error);
-                        await interaction.editReply(messenger.errorMessages('Discord 文字数制限が発生しました', error.message));
+                        await processingMsg.edit(messenger.errorMessages('Discord 文字数制限が発生しました', error.message));
                     }
                     // その他のエラーの場合
                     else {
                         await logger.errorToFile('Anthropic API の返信でエラーが発生', error);
-                        await interaction.editReply(messenger.errorMessages('Anthropic API の返信でエラーが発生しました', error.message));
+                        await processingMsg.edit(messenger.errorMessages('Anthropic API の返信でエラーが発生しました', error.message));
                     }
                 } finally {
                     // 使用トークンをロギング
@@ -227,11 +277,17 @@ module.exports = {
         const channelId = process.env.CHAT_CHANNEL_ID.split(',');
         const anthropicEmoji = process.env.ANTHROPIC_EMOJI;
 
-        if (!channelId.includes(message.channelId)) return;
+        const channel = message.channel;
+        if (!channel.isThread()) return;
+        if (!channelId.includes(channel.parentId)) return;
 
         try {
-            const previousMessageId = message.reference.messageId;
-            const state = await logger.loadConversationState(previousMessageId);
+            const previousMessageId = message.reference?.messageId ?? null;
+            let state = await logger.loadThreadConversationState(channel.id);
+
+            if ((!state || !state.summary) && previousMessageId) {
+                state = await logger.loadConversationState(previousMessageId);
+            }
 
             // 状態が存在しない場合は会話の継続対象外
             if (!state || !state.summary) return;
@@ -254,7 +310,7 @@ module.exports = {
                     try {
                         const response = await fetch(attachment.url);
                         const arrayBuffer = await response.arrayBuffer();
-                        rawAttachment = Buffer.from(arrayBuffer).toString();
+                        rawAttachment = Buffer.from(arrayBuffer).toString('utf-8');
                         attachmentContent = rawAttachment
                             .replace(/\r\n/g, '\n')
                             .replace(/\n{3,}/g, '\n\n')
@@ -273,10 +329,10 @@ module.exports = {
                 let usedModel = 'unknown';
                 let usage = [];
                 try {
-                    const previousModel = state.model || 'claude-sonnet-4-6';
+                    const previousModel = state.model || MODELS.DEFAULT;
                     // 高額モデル使用時の会話継続時は安価モデルにフォールバック
-                    const modelToUse = previousModel.includes('claude-fable-5')
-                        ? 'claude-sonnet-4-6'
+                    const modelToUse = previousModel === MODELS.PREMIUM
+                        ? MODELS.DEFAULT
                         : previousModel;
 
                     const messages = [];
@@ -319,57 +375,67 @@ module.exports = {
                         max_tokens: 32000
                     };
 
-                    const completion = await ANTHROPIC.messages.create(completionParams);
+                    const completion = await createMessage(ANTHROPIC, completionParams);
                     usedModel = completion.model;
                     usage = completion.usage;
 
-                    const answer = completion.content[0];
-                    await logger.logToFile(`回答 : ${answer.text.trim()}`);
+                    const answerText = (completion.content || [])
+                        .filter((content) => content.type === 'text')
+                        .map((content) => content.text)
+                        .join('\n')
+                        .trim();
 
-                    const splitMessages = splitAnswer(answer.text);
-                    let lastMessageId;
+                    if (!answerText) {
+                        throw new Error('Anthropic API の回答が空でした');
+                    }
 
+                    await logger.logToFile(`回答 : ${answerText}`); // 回答をコンソールに出力
+
+                    // 回答を分割してスレッドへ投稿
+                    const splitMessages = splitAnswer(answerText);
+
+                    // 単一メッセージの場合
                     if (splitMessages.length === 1) {
-                        const replyMsg = await processingMsg.edit({
+                        await processingMsg.edit({
                             content: messenger.answerMessages(anthropicEmoji, splitMessages[0])
                         });
-                        lastMessageId = replyMsg.id;
-                    } else {
+                    }
+                    // 複数メッセージの場合
+                    else {
                         for (let i = 0; i < splitMessages.length; i++) {
                             const msgText = splitMessages[i];
                             if (i === 0) {
                                 await processingMsg.edit({
                                     content: messenger.answerFollowMessages(anthropicEmoji, msgText, i + 1, splitMessages.length)
                                 });
-                                if (i === splitMessages.length - 1) lastMessageId = processingMsg.id;
                             } else {
-                                const followMsg = await message.reply({
+                                await message.reply({
                                     content: messenger.answerFollowMessages(anthropicEmoji, msgText, i + 1, splitMessages.length)
                                 });
-                                if (i === splitMessages.length - 1) lastMessageId = followMsg.id;
                             }
                         }
                     }
 
-                    // 会話状態を保存
+                    // 会話状態を要約して保存
                     try {
-                        const summaryResult = await summarizeConversationState(ANTHROPIC, previousSummary, request, attachmentContent, answer.text);
+                        const summaryResult = await summarizeConversationState(ANTHROPIC, previousSummary, request, attachmentContent, answerText);
                         if (summaryResult.summary) {
-                            await logger.saveConversationState(lastMessageId, {
+                            const conversationState = {
                                 summary: summaryResult.summary,
                                 last_message_id: completion.id,
                                 promptParam: promptParam,
                                 model: completion.model
-                            });
-
-                            await logger.logToFile(`会話状態保存 : ${lastMessageId}`);
+                            };
+                            await logger.saveThreadConversationState(channel.id, conversationState);
+                            await logger.logToFile(`会話状態保存 : ${channel.id}`);
                         }
+                        await logger.tokenToFile(summaryResult.model, summaryResult.usage);
                     } catch (error) {
                         await logger.errorToFile('会話状態の保存でエラーが発生', error);
                     }
                 } catch (error) {
                     // Discord の文字数制限の場合
-                    if (error.message.includes('Invalid Form Body')) {
+                    if (error.code === 50035 || error.message?.includes('Invalid Form Body')) {
                         await logger.errorToFile('Discord 文字数制限が発生', error);
                         await processingMsg.edit(messenger.errorMessages('Discord 文字数制限が発生しました', error.message));
                     }
@@ -389,8 +455,79 @@ module.exports = {
     }
 };
 
+// Anthropic にメッセージを送信
+async function createMessage(ANTHROPIC, completionParams) {
+    // メインの回答生成はストリーミングで取得
+    const stream = ANTHROPIC.messages.stream(completionParams);
+    return await stream.finalMessage();
+}
+
+// スレッド名を生成
+async function generateThreadName(ANTHROPIC, request, attachmentContent) {
+    const threadNamePrompt = [
+        '<user_request>',
+        request,
+        '</user_request>',
+        '',
+        attachmentContent
+            ? [
+                '<attachment_excerpt>',
+                limitText(attachmentContent, 6000),
+                '</attachment_excerpt>'
+            ].join('\n')
+            : '<attachment_excerpt>なし</attachment_excerpt>'
+    ].join('\n');
+
+    const systemPrompt =
+        `ユーザの質問文と添付ファイルの抜粋から Discord スレッド名に適した日本語の短文に要約\n` +
+        `質問には回答せず，スレッド名のみを 1 行で返す\n` +
+        `添付ファイルがある場合は <attachment_excerpt> の内容も反映する\n` +
+        `40 文字以内，体言止め，記号や絵文字や引用符は使わない\n` +
+        `謝罪，挨拶，前置き，添付ファイルが見当たらない等の説明は絶対に含めない`;
+
+    const completion = await ANTHROPIC.messages.create({
+        model: MODELS.LIGHT,
+        max_tokens: 100,
+        temperature: 0,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: [{ type: 'text', text: threadNamePrompt }] }]
+    });
+
+    let name = (completion.content || [])
+        .filter((content) => content.type === 'text')
+        .map((content) => content.text)
+        .join('')
+        .trim();
+
+    name = name
+        .replace(/[\r\n]+/g, ' ')
+        .replace(/^[#\s]+/g, '')
+        .replace(/^["「『]+|["」』]+$/g, '')
+        .replace(/[#"「」『』【】\[\]（）()<>`*_~|]/g, '')
+        .trim();
+
+    if (!name) name = '新しい会話';
+    if (name.length > THREAD_MAX_LENGTH) name = name.slice(0, THREAD_MAX_LENGTH - 5) + '…';
+    return name;
+}
+
+// スレッド起点メッセージを構築
+function buildStarterMessage(userId, request, attachmentInfo) {
+    const lines = [`<@${userId}> からの質問`, '', request.trim()];
+    if (attachmentInfo) {
+        lines.push('', `📎 添付ファイル : [${attachmentInfo.name}](${attachmentInfo.url})`);
+    }
+    let content = lines.join('\n');
+    // Discord メッセージ上限を考慮
+    if (content.length > MESSAGE_MAX_LENGTH) {
+        content = content.slice(0, MESSAGE_MAX_LENGTH - 10) + '…';
+    }
+    return content;
+}
+
+// 会話状態を要約
 async function summarizeConversationState(ANTHROPIC, previousSummary, request, attachmentContent, answerText) {
-    const summaryModel = 'claude-haiku-4-5';
+    const summaryModel = MODELS.LIGHT;
     const summaryMaxTokens = 1200;
 
     const summaryPrompt = [
@@ -414,6 +551,7 @@ async function summarizeConversationState(ANTHROPIC, previousSummary, request, a
         limitText(answerText, 16000),
         '</current_assistant_answer>'
     ].join('\n');
+
     const completion = await ANTHROPIC.messages.create({
         model: summaryModel,
         max_tokens: summaryMaxTokens,
@@ -438,16 +576,11 @@ async function summarizeConversationState(ANTHROPIC, previousSummary, request, a
     };
 }
 
-function limitText(text, maxLength) {
+// 文字列を指定長で切り詰める
+function limitText(text, max) {
     if (!text) return '';
-
-    if (text.length <= maxLength) {
-        return text;
-    }
-
-    return (
-        text.slice(0, maxLength) + `\n\n… ${text.length - maxLength} 文字を省略 …`
-    );
+    if (text.length <= max) return text;
+    return text.slice(0, max) + '…';
 }
 
 function promptGenerator(prompt) {
@@ -499,10 +632,9 @@ Subject は英語で簡潔な 30 字程度の要約とする
         default:
             return `ユーザからの「質問」に対して，Step-By-Step でなるべく詳細に説明すること．`;
     }
-};
+}
 
 function splitAnswer(answer) {
-    const maxLen = 1900; // Discord の文字数制限に余裕をもたせる
     let messages = [];
     let currentMessage = '';
     let inCodeBlock = false;
@@ -516,7 +648,7 @@ function splitAnswer(answer) {
             if (!inCodeBlock) {
                 inCodeBlock = true;
                 codeLanguage = line.slice(3).trim();
-                if (currentMessage.length + line.length > maxLen) {
+                if (currentMessage.length + line.length > MESSAGE_MAX_LENGTH) {
                     messages.push(currentMessage.trim());
                     currentMessage = '';
                 }
@@ -526,7 +658,7 @@ function splitAnswer(answer) {
             else {
                 inCodeBlock = false;
                 currentMessage += line + '\n';
-                if (currentMessage.length > maxLen) {
+                if (currentMessage.length > MESSAGE_MAX_LENGTH) {
                     messages.push(currentMessage.trim());
                     currentMessage = '```' + codeLanguage + '\n';
                 }
@@ -535,7 +667,7 @@ function splitAnswer(answer) {
         // コードブロック内の処理
         else if (inCodeBlock) {
             // コードブロック内で分割する場合、閉じタグと開始タグを追加
-            if (currentMessage.length + line.length > maxLen) {
+            if (currentMessage.length + line.length > MESSAGE_MAX_LENGTH) {
                 currentMessage += '```\n';
                 messages.push(currentMessage.trim());
                 currentMessage = '```' + codeLanguage + '\n' + line + '\n';
@@ -546,7 +678,7 @@ function splitAnswer(answer) {
         // 通常のメッセージ処理
         else {
             // 最大長を超える場合に新しいメッセージを開始
-            if (currentMessage.length + line.length > maxLen) {
+            if (currentMessage.length + line.length > MESSAGE_MAX_LENGTH) {
                 messages.push(currentMessage.trim());
                 currentMessage = line + '\n';
             } else {
@@ -561,4 +693,4 @@ function splitAnswer(answer) {
     }
 
     return messages;
-};
+}

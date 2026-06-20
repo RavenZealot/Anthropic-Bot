@@ -31,10 +31,9 @@ const DISCORD = new Discord.Client({
 });
 
 // Anthropic API クライアントを作成
-const configuration = new Anthropic({
+const ANTHROPIC = new Anthropic({
     apiKey: process.env.ANTHROPIC_API_KEY
 });
-const ANTHROPIC = new Anthropic(configuration);
 
 const commands = {};
 
@@ -93,4 +92,4 @@ async function loadCommands() {
         commands[command.data.name] = command;
         await logger.logToFile(`コマンド \`${command.data.name}\` を読み込みました`);
     }
-};
+}
