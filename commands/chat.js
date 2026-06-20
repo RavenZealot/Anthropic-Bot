@@ -40,12 +40,6 @@ module.exports = {
                 required: false
             },
             {
-                name: '公開',
-                description: '他のユーザに公開するかを選択してください．',
-                type: 5,
-                required: false
-            },
-            {
                 name: '最上位モデル',
                 description: '最上位モデル（高額）を使用するかを選択してください．',
                 type: 5,
@@ -74,8 +68,6 @@ module.exports = {
             // 選択されたプロンプト方式から質問文を生成
             const promptParam = interaction.options.getString('プロンプト') || 'default';
             const prompt = promptGenerator(promptParam);
-            // 公開設定を取得
-            const isPublic = interaction.options.getBoolean('公開') ?? true;
             // 最上位モデル使用設定を取得
             const usePremiumModel = interaction.options.getBoolean('最上位モデル') ?? false;
 
@@ -105,7 +97,7 @@ module.exports = {
             }
 
             // interaction の返信を遅延させる
-            await interaction.deferReply({ flags: isPublic ? 0 : MessageFlags.Ephemeral });
+            await interaction.deferReply();
 
             // Anthropic に質問を送信し回答を取得
             (async () => {
@@ -167,8 +159,7 @@ module.exports = {
                     // 単一メッセージの場合
                     if (splitMessages.length === 1) {
                         const replyMsg = await interaction.editReply({
-                            content: messenger.answerMessages(anthropicEmoji, splitMessages[0]),
-                            flags: isPublic ? 0 : MessageFlags.Ephemeral
+                            content: messenger.answerMessages(anthropicEmoji, splitMessages[0])
                         });
                         lastMessageId = replyMsg.id;
                     }
@@ -178,16 +169,14 @@ module.exports = {
                             const message = splitMessages[i];
                             if (i === 0) {
                                 const replyMsg = await interaction.editReply({
-                                    content: messenger.answerFollowMessages(anthropicEmoji, message, i + 1, splitMessages.length),
-                                    flags: isPublic ? 0 : MessageFlags.Ephemeral
+                                    content: messenger.answerFollowMessages(anthropicEmoji, message, i + 1, splitMessages.length)
                                 });
                                 if (i === splitMessages.length - 1) {
                                     lastMessageId = replyMsg.id;
                                 }
                             } else {
                                 const followMsg = await interaction.followUp({
-                                    content: messenger.answerFollowMessages(anthropicEmoji, message, i + 1, splitMessages.length),
-                                    flags: isPublic ? 0 : MessageFlags.Ephemeral
+                                    content: messenger.answerFollowMessages(anthropicEmoji, message, i + 1, splitMessages.length)
                                 });
                                 if (i === splitMessages.length - 1) {
                                     lastMessageId = followMsg.id;
