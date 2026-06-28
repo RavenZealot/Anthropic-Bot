@@ -133,7 +133,7 @@ module.exports = {
 
                 (async () => {
                     let usedModel = 'unknown';
-                    let usage = [];
+                    let usage = {};
 
                     try {
                         const { completion, answerText } = await createChatResponse(ANTHROPIC, {
@@ -210,7 +210,7 @@ module.exports = {
             // Anthropic に質問を送信し回答を取得
             (async () => {
                 let usedModel = 'unknown';
-                let usage = [];
+                let usage = {};
                 try {
                     // Anthropic API への入力メッセージを構築
                     const { completion, answerText } = await createChatResponse(ANTHROPIC, {
@@ -330,7 +330,7 @@ module.exports = {
 
             (async () => {
                 let usedModel = 'unknown';
-                let usage = [];
+                let usage = {};
                 try {
                     const previousModel = state.model || MODELS.DEFAULT;
                     // 高額モデル使用時の会話継続時は安価モデルにフォールバック
