@@ -1,4 +1,4 @@
-const { MessageFlags, ChannelType } = require('discord.js');
+const { MessageFlags, ChannelType, ApplicationCommandType, ApplicationCommandOptionType } = require('discord.js');
 
 const logger = require('../utils/logger');
 const messenger = require('../utils/messenger');
@@ -9,26 +9,32 @@ const MODELS = {
     DEFAULT: 'claude-sonnet-4-6',
     LIGHT: 'claude-haiku-4-5'
 };
+const CODE_PROMPTS = new Set([
+    'code',
+    'code_analysis',
+    'code_review',
+    'log_analysis'
+]);
 
-const MESSAGE_MAX_LENGTH = 2000;
+const MESSAGE_MAX_LENGTH = 1900;
 const THREAD_MAX_LENGTH = 80;
 
 module.exports = {
     data: {
         name: 'chat',
         description: 'Anthropic APIへ質問すると答えが返ってきます．',
-        type: 1,
+        type: ApplicationCommandType.ChatInput,
         options: [
             {
                 name: '質問',
                 description: '質問したい文を入れてください．',
-                type: 3,
+                type: ApplicationCommandOptionType.String,
                 required: true
             },
             {
                 name: 'プロンプト',
                 description: '回答アルゴリズムを指定できます．',
-                type: 3,
+                type: ApplicationCommandOptionType.String,
                 required: false,
                 choices: [
                     { name: 'デフォルト', value: 'default' },
@@ -46,20 +52,26 @@ module.exports = {
             {
                 name: '添付ファイル',
                 description: 'ファイルを添付してください（テキストファイルのみ）．',
-                type: 11,
+                type: ApplicationCommandOptionType.Attachment,
+                required: false
+            },
+            {
+                name: 'インライン回答',
+                description: 'スレッドを作成せず，このチャンネルへ直接回答します．',
+                type: ApplicationCommandOptionType.Boolean,
                 required: false
             },
             {
                 name: '最上位モデル',
                 description: '最上位モデル（高額）を使用するかを選択してください．',
-                type: 5,
+                type: ApplicationCommandOptionType.Boolean,
                 required: false
             }
         ]
     },
 
     async execute(interaction, ANTHROPIC) {
-        const channelId = process.env.CHAT_CHANNEL_ID.split(',');
+        const channelId = process.env.CHAT_CHANNEL_ID.split(',').map((id) => id.trim());
         const anthropicEmoji = process.env.ANTHROPIC_EMOJI;
         // インタラクションが特定のチャンネルでなければ何もしない
         if (!channelId.includes(interaction.channelId)) {
@@ -78,21 +90,26 @@ module.exports = {
             // 選択されたプロンプト方式から質問文を生成
             const promptParam = interaction.options.getString('プロンプト') || 'default';
             const prompt = promptGenerator(promptParam);
+            // インライン回答の有無を取得
+            const inlineReply = interaction.options.getBoolean('インライン回答') ?? false;
             // 最上位モデル使用設定を取得
             const usePremiumModel = interaction.options.getBoolean('最上位モデル') ?? false;
 
             await logger.logToFile(`指示 : ${prompt.trim()}`); // 指示をコンソールに出力
             await logger.logToFile(`質問 : ${request.trim()}`); // 質問をコンソールに出力
 
+            // interaction の返信を遅延させる
+            await interaction.deferReply();
+
             // 添付ファイルがある場合は内容を取得
             let rawAttachment = '';
             let attachmentContent = '';
             let attachmentInfo = null;
-            if (interaction.options.get('添付ファイル')) {
-                const attachment = interaction.options.getAttachment('添付ファイル');
+            const attachment = interaction.options.getAttachment('添付ファイル');
+            if (attachment) {
                 attachmentInfo = { name: attachment.name, url: attachment.url };
                 // 添付ファイルがテキストの場合は質問文に追加
-                if (attachment.contentType && attachment.contentType.startsWith('text/')) {
+                if (attachment.contentType?.startsWith('text/')) {
                     try {
                         const response = await fetch(attachment.url);
                         const arrayBuffer = await response.arrayBuffer();
@@ -105,11 +122,55 @@ module.exports = {
                         await logger.errorToFile('添付ファイルの取得中にエラーが発生', error);
                     }
                 }
-                await logger.logToFileForAttachment(rawAttachment.trim());
+                await logger.logToFile(`添付ファイル : ${attachment.name}, ${attachment.contentType}, ${attachment.size}`);
             }
 
-            // interaction の返信を遅延させる
-            await interaction.deferReply();
+            // インラインで即時回答
+            if (inlineReply) {
+                await interaction.editReply({
+                    content: '回答を生成中…'
+                });
+
+                (async () => {
+                    let usedModel = 'unknown';
+                    let usage = [];
+
+                    try {
+                        const { completion, answerText } = await createChatResponse(ANTHROPIC, {
+                            promptParam,
+                            prompt,
+                            request,
+                            attachmentContent,
+                            usePremiumModel
+                        });
+
+                        usedModel = completion.model;
+                        usage = completion.usage;
+
+                        await logger.logToFile(`回答 : ${answerText}`);
+
+                        // 回答を分割して同じチャンネルへ投稿
+                        await sendSplitAnswer({
+                            answerText,
+                            anthropicEmoji,
+                            sendFirst: (content) => interaction.editReply({ content }),
+                            sendNext: (content) => interaction.followUp({ content })
+                        });
+                    } catch (error) {
+                        if (error.code === 50035 || error.message?.includes('Invalid Form Body')) {
+                            await logger.errorToFile('Discord 文字数制限が発生', error);
+                            await interaction.editReply(messenger.errorMessages('Discord 文字数制限が発生しました', error.message));
+                        } else {
+                            await logger.errorToFile('Anthropic API の返信でエラーが発生', error);
+                            await interaction.editReply(messenger.errorMessages('Anthropic API の返信でエラーが発生しました', error.message));
+                        }
+                    } finally {
+                        await logger.tokenToFile(usedModel, usage);
+                    }
+                })();
+
+                return;
+            }
 
             // 質問文からスレッド名を生成
             let threadName;
@@ -151,88 +212,29 @@ module.exports = {
                 let usedModel = 'unknown';
                 let usage = [];
                 try {
-                    // プロンプトタイプに応じたモデルの選択
-                    const codePrompts = ['code', 'code_analysis', 'code_review', 'log_analysis'];
-                    let modelToUse;
-                    if (usePremiumModel) {
-                        modelToUse = MODELS.PREMIUM;
-                    } else if (codePrompts.includes(promptParam)) {
-                        modelToUse = MODELS.CODE;
-                    } else {
-                        modelToUse = MODELS.DEFAULT;
-                    }
-
-                    const messages = [];
-                    const userContent = [];
-                    if (attachmentContent) {
-                        userContent.push({
-                            type: 'text',
-                            text: `<attachment>\n${attachmentContent}\n</attachment>`,
-                            cache_control: { type: 'ephemeral' }
-                        });
-                    }
-                    userContent.push({
-                        type: 'text',
-                        text: request
+                    // Anthropic API への入力メッセージを構築
+                    const { completion, answerText } = await createChatResponse(ANTHROPIC, {
+                        promptParam,
+                        prompt,
+                        request,
+                        attachmentContent,
+                        usePremiumModel
                     });
-                    messages.push({ role: 'user', content: userContent });
 
-                    const systemContent = [{
-                        type: 'text',
-                        text: prompt,
-                        cache_control: { type: 'ephemeral' }
-                    }];
-
-                    // モデルに応じてパラメータを設定
-                    let completionParams = {
-                        model: modelToUse,
-                        system: systemContent,
-                        messages: messages,
-                        max_tokens: 32000
-                    };
-
-                    const completion = await createMessage(ANTHROPIC, completionParams);
                     // 使用モデル情報を取得
                     usedModel = completion.model;
                     // 使用トークン情報を取得
                     usage = completion.usage;
 
-                    const answerText = (completion.content || [])
-                        .filter((content) => content.type === 'text')
-                        .map((content) => content.text)
-                        .join('\n')
-                        .trim();
-
-                    if (!answerText) {
-                        throw new Error('Anthropic API からの回答が空です');
-                    }
-
-                    await logger.logToFile(`回答 : ${answerText.trim()}`); // 回答をコンソールに出力
+                    await logger.logToFile(`回答 : ${answerText}`); // 回答をコンソールに出力
 
                     // 回答を分割してスレッドへ投稿
-                    const splitMessages = splitAnswer(answerText);
-                    let lastMessageId;
-                    // 単一メッセージの場合
-                    if (splitMessages.length === 1) {
-                        await processingMsg.edit({
-                            content: messenger.answerMessages(anthropicEmoji, splitMessages[0])
-                        });
-                    }
-                    // 複数メッセージの場合
-                    else {
-                        for (let i = 0; i < splitMessages.length; i++) {
-                            const message = splitMessages[i];
-                            if (i === 0) {
-                                await processingMsg.edit({
-                                    content: messenger.answerFollowMessages(anthropicEmoji, message, i + 1, splitMessages.length)
-                                });
-                            } else {
-                                await thread.send({
-                                    content: messenger.answerFollowMessages(anthropicEmoji, message, i + 1, splitMessages.length)
-                                });
-                            }
-                        }
-                    }
+                    await sendSplitAnswer({
+                        answerText,
+                        anthropicEmoji,
+                        sendFirst: (content) => processingMsg.edit({ content }),
+                        sendNext: (content) => thread.send({ content })
+                    });
 
                     // 会話状態を要約して保存
                     try {
@@ -274,7 +276,7 @@ module.exports = {
     },
 
     async handleReply(message, ANTHROPIC) {
-        const channelId = process.env.CHAT_CHANNEL_ID.split(',');
+        const channelId = process.env.CHAT_CHANNEL_ID.split(',').map((id) => id.trim());
         const anthropicEmoji = process.env.ANTHROPIC_EMOJI;
 
         const channel = message.channel;
@@ -285,12 +287,12 @@ module.exports = {
             const previousMessageId = message.reference?.messageId ?? null;
             let state = await logger.loadThreadConversationState(channel.id);
 
-            if ((!state || !state.summary) && previousMessageId) {
+            if (!state?.summary && previousMessageId) {
                 state = await logger.loadConversationState(previousMessageId);
             }
 
             // 状態が存在しない場合は会話の継続対象外
-            if (!state || !state.summary) return;
+            if (!state?.summary) return;
 
             const previousSummary = state.summary;
             const request = message.content;
@@ -304,9 +306,10 @@ module.exports = {
 
             let rawAttachment = '';
             let attachmentContent = '';
-            if (message.attachments.size > 0) {
+            if (message.attachments.size) {
                 const attachment = message.attachments.first();
-                if (attachment.contentType && attachment.contentType.startsWith('text/')) {
+                // 添付ファイルがテキストの場合は質問文に追加
+                if (attachment.contentType?.startsWith('text/')) {
                     try {
                         const response = await fetch(attachment.url);
                         const arrayBuffer = await response.arrayBuffer();
@@ -319,11 +322,11 @@ module.exports = {
                         await logger.errorToFile('添付ファイルの取得中にエラーが発生', error);
                     }
                 }
-                await logger.logToFileForAttachment(rawAttachment.trim());
+                await logger.logToFile(`添付ファイル : ${attachment.name}, ${attachment.contentType}, ${attachment.size}`);
             }
 
             await message.channel.sendTyping();
-            const processingMsg = await message.reply('回答を生成中…');
+            const processingMsg = await message.channel.send('回答を生成中…');
 
             (async () => {
                 let usedModel = 'unknown';
@@ -335,86 +338,31 @@ module.exports = {
                         ? MODELS.DEFAULT
                         : previousModel;
 
-                    const messages = [];
-                    const userContent = [];
-                    if (attachmentContent) {
-                        userContent.push({
-                            type: 'text',
-                            text: `<attachment>\n${attachmentContent}\n</attachment>`,
-                            cache_control: { type: 'ephemeral' }
-                        });
-                    }
-                    userContent.push({
-                        type: 'text',
-                        text: request
+                    // Anthropic API への入力メッセージを構築
+                    const { completion, answerText } = await createChatResponse(ANTHROPIC, {
+                        promptParam,
+                        prompt,
+                        request,
+                        attachmentContent,
+                        previousSummary,
+                        model: modelToUse
                     });
-                    messages.push({ role: 'user', content: userContent });
 
-                    const systemContent = [
-                        {
-                            type: 'text',
-                            text: prompt,
-                            cache_control: { type: 'ephemeral' }
-                        },
-                        {
-                            type: 'text',
-                            text:
-                                `あなたはユーザーとの過去の会話の要約を引き継いで対話するアシスタントです\n` +
-                                `<conversation_summary>\n` +
-                                `${previousSummary}\n` +
-                                `</conversation_summary>\n\n` +
-                                `上記の <conversation_summary> に記載されている「制約」や「要望」を厳密に守って回答してください`,
-                            cache_control: { type: 'ephemeral' }
-                        }
-                    ];
-
-                    let completionParams = {
-                        model: modelToUse,
-                        system: systemContent,
-                        messages: messages,
-                        max_tokens: 32000
-                    };
-
-                    const completion = await createMessage(ANTHROPIC, completionParams);
+                    // 使用モデル情報を取得
                     usedModel = completion.model;
+                    // 使用トークン情報を取得
                     usage = completion.usage;
-
-                    const answerText = (completion.content || [])
-                        .filter((content) => content.type === 'text')
-                        .map((content) => content.text)
-                        .join('\n')
-                        .trim();
-
-                    if (!answerText) {
-                        throw new Error('Anthropic API の回答が空でした');
-                    }
 
                     await logger.logToFile(`回答 : ${answerText}`); // 回答をコンソールに出力
 
                     // 回答を分割してスレッドへ投稿
-                    const splitMessages = splitAnswer(answerText);
+                    await sendSplitAnswer({
+                        answerText,
+                        anthropicEmoji,
+                        send: (content) => message.channel.send({ content })
+                    });
 
-                    // 単一メッセージの場合
-                    if (splitMessages.length === 1) {
-                        await processingMsg.edit({
-                            content: messenger.answerMessages(anthropicEmoji, splitMessages[0])
-                        });
-                    }
-                    // 複数メッセージの場合
-                    else {
-                        for (let i = 0; i < splitMessages.length; i++) {
-                            const msgText = splitMessages[i];
-                            if (i === 0) {
-                                await processingMsg.edit({
-                                    content: messenger.answerFollowMessages(anthropicEmoji, msgText, i + 1, splitMessages.length)
-                                });
-                            } else {
-                                await message.reply({
-                                    content: messenger.answerFollowMessages(anthropicEmoji, msgText, i + 1, splitMessages.length)
-                                });
-                            }
-                        }
-                    }
+                    await processingMsg.delete().catch((error) => logger.errorToFile('回答生成中メッセージの削除でエラーが発生', error));
 
                     // 会話状態を要約して保存
                     try {
@@ -460,6 +408,99 @@ async function createMessage(ANTHROPIC, completionParams) {
     // メインの回答生成はストリーミングで取得
     const stream = ANTHROPIC.messages.stream(completionParams);
     return await stream.finalMessage();
+}
+
+// Anthropic に質問を送信して回答を取得
+async function createChatResponse(ANTHROPIC, { promptParam, prompt, request, attachmentContent = '', previousSummary = null, usePremiumModel = false, model = null }) {
+    // Anthropic API への入力メッセージを構築
+    const messages = buildInputMessages(request, attachmentContent);
+    const systemContent = buildSystemContent(prompt, previousSummary);
+
+    // プロンプトタイプに応じたモデルの選択
+    const modelToUse = model ?? selectModel(promptParam, usePremiumModel);
+    // モデルに応じてパラメータを設定
+    const completion = await createMessage(ANTHROPIC, {
+        model: modelToUse,
+        system: systemContent,
+        messages,
+        max_tokens: 32000
+    });
+
+    const answerText = extractAnswerText(completion);
+
+    if (!answerText) {
+        throw new Error('Anthropic API からの回答が空です');
+    }
+
+    return {
+        completion,
+        answerText
+    };
+}
+
+// 入力メッセージを構築
+function buildInputMessages(request, attachmentContent) {
+    const userContent = [];
+
+    if (attachmentContent) {
+        userContent.push({
+            type: 'text',
+            text: `<attachment>\n${attachmentContent}\n</attachment>`,
+            cache_control: { type: 'ephemeral' }
+        });
+    }
+
+    userContent.push({
+        type: 'text',
+        text: request
+    });
+
+    userContent.push({
+        type: 'text',
+        text: '【注意】回答はMarkdown形式でなければ正しく表示されません'
+    });
+
+    return [
+        {
+            role: 'user',
+            content: userContent
+        }
+    ];
+}
+
+// システムメッセージを構築
+function buildSystemContent(prompt, previousSummary = null) {
+    const systemContent = [
+        {
+            type: 'text',
+            text: prompt,
+            cache_control: { type: 'ephemeral' }
+        }
+    ];
+
+    if (previousSummary) {
+        systemContent.push({
+            type: 'text',
+            text:
+                `あなたはユーザーとの過去の会話の要約を引き継いで対話するアシスタントです\n` +
+                `<conversation_summary>\n` +
+                `${previousSummary}\n` +
+                `</conversation_summary>\n\n` +
+                `上記の <conversation_summary> に記載されている「制約」や「要望」を厳密に守って回答してください`,
+            cache_control: { type: 'ephemeral' }
+        });
+    }
+
+    return systemContent;
+}
+
+// Anthropic のレスポンスからテキスト回答を抽出
+function extractAnswerText(completion) {
+    return (completion.content || [])
+        .filter((content) => content.type === 'text')
+        .map((content) => content.text)
+        .join('\n')
+        .trim();
 }
 
 // スレッド名を生成
@@ -576,11 +617,22 @@ async function summarizeConversationState(ANTHROPIC, previousSummary, request, a
     };
 }
 
-// 文字列を指定長で切り詰める
-function limitText(text, max) {
-    if (!text) return '';
-    if (text.length <= max) return text;
-    return text.slice(0, max) + '…';
+// 回答を分割して送信
+async function sendSplitAnswer({ answerText, anthropicEmoji, send, sendFirst = send, sendNext = send }) {
+    if (!sendFirst || !sendNext) {
+        throw new Error('sendFirst および sendNext 関数は必須です');
+    }
+
+    const splitMessages = splitAnswer(answerText);
+
+    for (let i = 0; i < splitMessages.length; i++) {
+        const content = splitMessages.length === 1
+            ? messenger.answerMessages(anthropicEmoji, splitMessages[i])
+            : messenger.answerFollowMessages(anthropicEmoji, splitMessages[i], i + 1, splitMessages.length);
+
+        const sender = i ? sendNext : sendFirst;
+        await sender(content);
+    }
 }
 
 function promptGenerator(prompt) {
@@ -634,6 +686,27 @@ Subject は英語で簡潔な 30 字程度の要約とする
     }
 }
 
+// プロンプトタイプに応じたモデルの選択
+function selectModel(promptParam, usePremiumModel = false) {
+    if (usePremiumModel) {
+        return MODELS.PREMIUM;
+    }
+
+    if (CODE_PROMPTS.has(promptParam)) {
+        return MODELS.CODE;
+    }
+
+    return MODELS.DEFAULT;
+}
+
+// 文字列を指定長で切り詰める
+function limitText(text, max) {
+    if (!text) return '';
+    if (text.length <= max) return text;
+    return text.slice(0, max) + '…';
+}
+
+// 回答を分割する
 function splitAnswer(answer) {
     let messages = [];
     let currentMessage = '';
@@ -688,7 +761,7 @@ function splitAnswer(answer) {
     }
 
     // 残りのメッセージを追加
-    if (currentMessage.length > 0) {
+    if (currentMessage.length) {
         messages.push(currentMessage.trim());
     }
 
